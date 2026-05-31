@@ -1,20 +1,17 @@
 """
-routes/webhook.py
-POST /api/webhook — called automatically by n8n.
-n8n watches Gmail / Slack / Jira, extracts text, posts here.
-No human needed — fully automated intake.
+routes/webhook.py — POST /api/webhook (automated trigger from n8n)
+Receives Gmail / Jira payloads, runs pipeline, saves to DB.
 """
 import logging
-from fastapi import APIRouter, Header, HTTPException
 import os
+from fastapi import APIRouter, Header, HTTPException
 from models.schemas import WebhookRequest
 from services.pipeline import run_full_pipeline
+from services.database import save_report
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Optional shared secret — set WEBHOOK_SECRET in Railway env vars
-# n8n adds it as X-Webhook-Secret header
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 
@@ -23,19 +20,10 @@ async def webhook(
     req: WebhookRequest,
     x_webhook_secret: str = Header(default=""),
 ):
-    """
-    Receives ESG document text from n8n (Gmail/Slack/Jira triggers).
-    Runs full pipeline automatically and returns results.
-    n8n can then push those results to Notion/Slack/email.
-    """
-    # Validate shared secret if configured
     if WEBHOOK_SECRET and x_webhook_secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="Invalid webhook secret.")
 
-    logger.info(
-        f"n8n webhook received: source={req.source} "
-        f"file={req.filename} company={req.metadata.get('company','unknown')}"
-    )
+    logger.info(f"Webhook: source={req.source} file={req.filename}")
 
     result = await run_full_pipeline(
         content=req.content,
@@ -46,8 +34,10 @@ async def webhook(
         frameworks=req.metadata.get("frameworks", ["GRI", "SASB", "TCFD"]),
     )
 
-    # Include source metadata in response so n8n can log/route it
-    result["_source"] = req.source
+    # Save to DB — this is what makes it appear in the UI
+    report_id = await save_report(result, source=req.source, filename=req.filename or "")
+    result["_id"]       = report_id
+    result["_source"]   = req.source
     result["_filename"] = req.filename
 
     return result
