@@ -1,11 +1,11 @@
 """
 routes/webhook.py — POST /api/webhook (automated trigger from n8n)
-Receives Gmail / Jira payloads, runs pipeline, saves to DB.
 """
 import logging
 import os
-from fastapi import APIRouter, Header, HTTPException
-from models.schemas import WebhookRequest
+import re
+import json
+from fastapi import APIRouter, HTTPException, Request
 from services.pipeline import run_full_pipeline
 from services.database import save_report
 
@@ -16,28 +16,53 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 
 @router.post("/api/webhook")
-async def webhook(
-    req: WebhookRequest,
-    x_webhook_secret: str = Header(default=""),
-):
-    if WEBHOOK_SECRET and x_webhook_secret != WEBHOOK_SECRET:
+async def webhook(request: Request):
+    x_secret = request.headers.get("x-webhook-secret", "")
+    if WEBHOOK_SECRET and x_secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="Invalid webhook secret.")
 
-    logger.info(f"Webhook: source={req.source} file={req.filename}")
+    body = await request.json()
+
+    source   = body.get("source", "n8n")
+    content  = body.get("content", "")
+    filename = body.get("filename", "unknown")
+    metadata = body.get("metadata", {})
+
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except:
+            metadata = {}
+
+    company    = metadata.get("company", "")
+    if not company or company.strip() == "Unknown":
+        name = re.sub(r'\.(txt|pdf|csv|xlsx)$', '', filename, flags=re.IGNORECASE)
+        name = re.sub(r'[_\-]', ' ', name)
+        name = re.sub(r'\s*(ESG|Report|Data|Disclosure|2024|2025|2026).*', '', name, flags=re.IGNORECASE).strip()
+        company = name if len(name) > 2 else "Unknown"
+
+    industry   = metadata.get("industry", "General")
+    year       = metadata.get("year", "2024")
+    frameworks = metadata.get("frameworks", ["GRI", "SASB", "TCFD"])
+    notes      = metadata.get("notes", "")
+
+    if not content or len(content.strip()) < 20:
+        raise HTTPException(status_code=400, detail="No content provided")
+
+    logger.info(f"Webhook received: source={source} file={filename} company={company}")
 
     result = await run_full_pipeline(
-        content=req.content,
-        company=req.metadata.get("company", "Unknown"),
-        industry=req.metadata.get("industry", "General"),
-        year=req.metadata.get("year", "2024"),
-        notes=req.metadata.get("notes", ""),
-        frameworks=req.metadata.get("frameworks", ["GRI", "SASB", "TCFD"]),
+        content=content,
+        company=company,
+        industry=industry,
+        year=year,
+        notes=notes,
+        frameworks=frameworks
     )
 
-    # Save to DB — this is what makes it appear in the UI
-    report_id = await save_report(result, source=req.source, filename=req.filename or "")
+    report_id = await save_report(result, source=source, filename=filename)
     result["_id"]       = report_id
-    result["_source"]   = req.source
-    result["_filename"] = req.filename
+    result["_source"]   = source
+    result["_filename"] = filename
 
     return result
