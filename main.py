@@ -1,7 +1,7 @@
 """
 main.py — ClarityESG FastAPI entry point.
 """
-import os
+import          os
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
